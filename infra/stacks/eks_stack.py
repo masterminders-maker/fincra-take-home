@@ -26,7 +26,7 @@ from constructs import Construct
 
 # Repo URL that Argo CD will watch. Overridden via CDK context / env var in CI
 # so the same stack works for forks.
-DEFAULT_REPO_URL = "https://github.com/YOUR_GITHUB_USER/fincra-devops-takehome.git"
+DEFAULT_REPO_URL = "https://github.com/masterminders-maker/fincra-take-home.git"
 
 
 class EksStack(Stack):
