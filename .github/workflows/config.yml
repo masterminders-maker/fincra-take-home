@@ -1,0 +1,207 @@
+name: config
+
+# Deploys the Fincra take-home stack on every push to main.
+#
+# Flow:
+#   1. lint-and-test    - sanity checks on CDK synth and manifests.
+#   2. build-and-push   - build Docker image, push to ECR with the git SHA as tag.
+#   3. deploy-infra     - CDK deploy of NetworkStack + EksStack (idempotent).
+#   4. bump-image       - commit a kustomize image tag bump so Argo CD rolls out.
+#
+# Everything after deploy-infra is pull-based: Argo CD watches the repo and
+# reconciles the cluster. We never `kubectl apply` from CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Required for GitHub OIDC → AWS IAM federation. No static AWS keys anywhere.
+permissions:
+  id-token: write
+  contents: write        # bump-image job commits the tag bump back to main
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: fincra-app
+  # Set these in the repo's GitHub Actions secrets / variables before first run:
+  #   AWS_DEPLOY_ROLE_ARN  → IAM role trust-policy'd to this repo via OIDC
+  #   AWS_ACCOUNT_ID       → target account
+  # Kept as vars (not secrets) since ARNs and account IDs are not sensitive.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Lint + sanity tests. Fast fail before we touch AWS.
+  # ---------------------------------------------------------------------------
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CDK deps
+        working-directory: infra
+        run: pip install -r requirements.txt
+
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk@2
+
+      - name: CDK synth (no AWS creds needed)
+        working-directory: infra
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"   # placeholder for synth only
+          CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: cdk synth
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Kustomize build sanity
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+          kustomize build k8s/overlays/dev > /tmp/rendered.yaml
+          # Basic checks: must contain Deployment, Service, Ingress.
+          grep -q "kind: Deployment" /tmp/rendered.yaml
+          grep -q "kind: Service" /tmp/rendered.yaml
+          grep -q "kind: Ingress" /tmp/rendered.yaml
+          echo "kustomize build: OK"
+
+  # ---------------------------------------------------------------------------
+  # 2. Build the container image and push to ECR, tagged with the git SHA.
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repo exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" \
+            || aws ecr create-repository --repository-name "$ECR_REPOSITORY" \
+                 --image-scanning-configuration scanOnPush=true
+
+      - name: Build and push image
+        run: |
+          IMAGE_URI="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${{ steps.meta.outputs.tag }}"
+          docker build -t "$IMAGE_URI" ./app
+          docker push "$IMAGE_URI"
+          echo "Pushed: $IMAGE_URI"
+
+  # ---------------------------------------------------------------------------
+  # 3. Deploy / update infrastructure. Idempotent — safe to run every push.
+  # ---------------------------------------------------------------------------
+  deploy-infra:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2
+
+      - name: Install CDK Python deps
+        working-directory: infra
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: CDK bootstrap (no-op if already done)
+        working-directory: infra
+        env:
+          CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: cdk bootstrap "aws://${{ vars.AWS_ACCOUNT_ID }}/${{ env.AWS_REGION }}"
+
+      - name: CDK deploy
+        working-directory: infra
+        env:
+          CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
+        run: cdk deploy --all --require-approval never
+
+  # ---------------------------------------------------------------------------
+  # 4. Bump the image tag in the dev overlay and commit.
+  #    Argo CD sees the commit and rolls out the new image. No kubectl here.
+  # ---------------------------------------------------------------------------
+  bump-image:
+    needs: [build-and-push, deploy-infra]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR (for the registry URL)
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update image tag in dev overlay
+        run: |
+          cd k8s/overlays/dev
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
+          TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          kustomize edit set image "ghcr.io/YOUR_GITHUB_USER/fincra-app=${IMAGE}:${TAG}"
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/overlays/dev/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No image tag change to commit."
+            exit 0
+          fi
+          git commit -m "ci: bump image to ${{ needs.build-and-push.outputs.image_tag }} [skip ci]"
+          git push

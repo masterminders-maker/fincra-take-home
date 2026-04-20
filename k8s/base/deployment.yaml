@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fincra-app
+  labels:
+    app.kubernetes.io/name: fincra-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fincra-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fincra-app
+    spec:
+      containers:
+        - name: web
+          # Image tag is patched per-overlay. The CI workflow pushes a
+          # :<git-sha> tag to ECR on every commit; the overlay references
+          # that tag so Argo CD rolls out automatically.
+          image: ghcr.io/YOUR_GITHUB_USER/fincra-app:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

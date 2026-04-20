@@ -1,0 +1,23 @@
+## Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+## CDK
+infra/cdk.out/
+infra/.cdk.staging/
+*.swp
+
+## Node
+node_modules/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## IDE
+.vscode/
+.idea/

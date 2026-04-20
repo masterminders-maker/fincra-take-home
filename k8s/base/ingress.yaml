@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fincra-app
+  annotations:
+    # These annotations tell the AWS Load Balancer Controller to provision
+    # an internet-facing ALB and point it at pod IPs directly. `ip` target
+    # type is mandatory on Fargate — `instance` only works for EC2 nodes.
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fincra-app
+                port:
+                  number: 80

@@ -1,0 +1,7 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fincra-app
+spec:
+  # 2 replicas so the ALB has >1 healthy target and we exercise rolling updates.
+  replicas: 2

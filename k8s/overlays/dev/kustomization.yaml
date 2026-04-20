@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+resources:
+  - ../../base
+
+# Pins the image and tag the CI job pushes. Override this placeholder with
+# your real ECR URI once you deploy: e.g.,
+#   675344693525.dkr.ecr.us-east-1.amazonaws.com/fincra-app
+# The tag is swapped by the GitHub Actions workflow using `kustomize edit set image`
+# so deploys are git-sha traceable.
+images:
+  - name: ghcr.io/YOUR_GITHUB_USER/fincra-app
+    newName: ghcr.io/YOUR_GITHUB_USER/fincra-app
+    newTag: latest
+
+patches:
+  - path: replica-patch.yaml
+    target:
+      kind: Deployment
+      name: fincra-app
+
+commonLabels:
+  environment: dev
