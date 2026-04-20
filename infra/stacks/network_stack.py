@@ -31,10 +31,12 @@ class NetworkStack(Stack):
         # VPC: 2 AZs is the minimum EKS supports; keeps the account footprint small.
         # Public subnets host the ALB; private subnets host Fargate pods.
         # NAT gateway lets Fargate pull container images from ECR over the internet.
+        # Explicit AZs (instead of max_azs) make the stack reproducible across
+        # accounts and avoid AWS lookups at synth time.
         self.vpc = ec2.Vpc(
             self,
             "FincraVpc",
-            max_azs=2,
+            availability_zones=["us-east-1a", "us-east-1b"],
             nat_gateways=1,
             ip_addresses=ec2.IpAddresses.cidr("10.0.0.0/16"),
             subnet_configuration=[

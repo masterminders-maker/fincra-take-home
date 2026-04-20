@@ -192,7 +192,7 @@ jobs:
           cd k8s/overlays/dev
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}"
           TAG="${{ needs.build-and-push.outputs.image_tag }}"
-          kustomize edit set image "ghcr.io/YOUR_GITHUB_USER/fincra-app=${IMAGE}:${TAG}"
+          kustomize edit set image "ghcr.io/masterminders-maker/fincra-app=${IMAGE}:${TAG}"
 
       - name: Commit and push
         run: |
