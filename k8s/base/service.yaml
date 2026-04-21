@@ -5,8 +5,9 @@ metadata:
   labels:
     app.kubernetes.io/name: fincra-app
 spec:
-  # ClusterIP is correct here — the ALB Controller targets pods directly
-  # (IP target type) in Fargate, so the Service is just for selector glue.
+  # ClusterIP is intentional. The ALB talks directly to pod IPs, not through
+  # the Service — so the Service is really just here to give the Ingress a
+  # selector to match pods against. No need for NodePort or LoadBalancer.
   type: ClusterIP
   selector:
     app.kubernetes.io/name: fincra-app

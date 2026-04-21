@@ -1,21 +1,21 @@
 """
-NetworkStack — VPC and security groups.
+This stack handles all the networking — the VPC and the two security groups
+that enforce the firewall rules from the brief.
 
-Implements the firewall rules stated in the assessment brief:
-  - Allow all egress
-  - Deny all ingress, but allow:
-      * TCP 80 and 443 from 0.0.0.0/0
-      * ICMP (echo / ping) from 0.0.0.0/0
-      * All TCP/UDP internal traffic within the VPC
+What's allowed in:
+  - HTTP (80) and HTTPS (443) from anywhere on the ALB
+  - ICMP / ping from anywhere (both the ALB and the pods)
+  - All TCP and UDP between resources inside the VPC
+  - Everything else is blocked by default
 
-Two security groups are created:
-  - alb_sg:     attached to the Application Load Balancer (internet-facing).
-  - cluster_sg: attached to workloads on the EKS Fargate cluster.
+We end up with two security groups:
+  - alb_sg:     sits on the internet-facing load balancer
+  - cluster_sg: sits on every Fargate pod ENI
 
-The "internal VPC traffic" rule is expressed as a self-referencing rule on
-cluster_sg plus an explicit rule permitting traffic from alb_sg to cluster_sg
-on the app port. That's the usual, least-astonishment pattern for an
-ALB-to-pod path.
+For the "allow internal VPC traffic" rule we use a self-referencing SG rule
+rather than opening the whole VPC CIDR. Anything wearing cluster_sg can talk
+to anything else wearing cluster_sg — same practical effect, tighter blast
+radius, and it's the pattern AWS themselves recommend for this topology.
 """
 from aws_cdk import (
     Stack,
@@ -28,10 +28,11 @@ class NetworkStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # VPC: 2 AZs is the minimum EKS supports; keeps the account footprint small.
-        # Public subnets host the ALB; private subnets host Fargate pods.
-        # NAT gateway lets Fargate pull container images from ECR over the internet.
-        # accounts and avoid AWS lookups at synth time.
+        # 2 AZs is the floor EKS requires, and it keeps costs down for a take-home.
+        # The ALB lives in the public subnets; Fargate pods stay in the private ones.
+        # The single NAT gateway is how the pods reach ECR to pull images — without
+        # it they'd have no route out. One NAT is fine here; prod would want one per AZ.
+        # Hardcoding the CIDR keeps the synth fast and avoids unnecessary AWS lookups.
         self.vpc = ec2.Vpc(
             self,
             "FincraVpc",
@@ -53,7 +54,7 @@ class NetworkStack(Stack):
         )
 
         # --- ALB security group -------------------------------------------------
-        # Internet-facing. The brief says HTTP/HTTPS and ICMP from the world.
+        # This one faces the internet, so we open HTTP, HTTPS, and ping from anywhere.
         self.alb_sg = ec2.SecurityGroup(
             self,
             "AlbSecurityGroup",
@@ -74,7 +75,8 @@ class NetworkStack(Stack):
         )
 
         # --- Cluster / workload security group ----------------------------------
-        # Attached to Fargate pod ENIs. Starts with no ingress (default deny).
+        # Goes on every Fargate pod. No ingress rules by default — we add only
+        # what's explicitly needed below.
         self.cluster_sg = ec2.SecurityGroup(
             self,
             "ClusterSecurityGroup",
@@ -83,11 +85,10 @@ class NetworkStack(Stack):
             allow_all_outbound=True,
         )
 
-        # Self-referencing rule: any resource carrying this SG can talk to any
-        # other resource carrying this SG on any TCP/UDP port. This is how the
-        # brief's "allow all tcp/udp internal traffic within the VPC" is most
-        # commonly expressed with SGs — scoped to the SG, not the full CIDR,
-        # which is stricter and still meets the requirement in practice.
+        # Pods need to talk to each other freely — CoreDNS, service mesh, whatever.
+        # The cleanest way to express this is a self-referencing rule: if you're
+        # carrying this SG you can reach anything else carrying this SG. It's
+        # tighter than opening the whole VPC CIDR and covers the brief's requirement.
         self.cluster_sg.add_ingress_rule(
             self.cluster_sg,
             ec2.Port.all_tcp(),
@@ -99,14 +100,15 @@ class NetworkStack(Stack):
             "Internal UDP between workloads",
         )
 
-        # ALB → pods. Target group health checks and traffic flow through here.
+        # Let the ALB actually reach the pods — health checks and real traffic both
+        # come through this rule.
         self.cluster_sg.add_ingress_rule(
             self.alb_sg,
             ec2.Port.tcp(80),
             "ALB to pods on app port",
         )
 
-        # Same ICMP allowance for workloads, for parity with the brief.
+        # Pods should be pingable too, not just the ALB.
         self.cluster_sg.add_ingress_rule(
             ec2.Peer.any_ipv4(),
             ec2.Port.icmp_ping(),

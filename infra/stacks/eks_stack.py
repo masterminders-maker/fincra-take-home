@@ -1,17 +1,20 @@
 """
-EksStack — EKS Fargate cluster, AWS Load Balancer Controller, Argo CD.
+This stack builds everything that actually runs workloads:
+an EKS Fargate cluster, the AWS Load Balancer Controller, and Argo CD.
 
-Responsibilities:
-  1. Provision an EKS cluster with Fargate profiles for the namespaces we use
-     (default, kube-system, argocd).
-  2. Install the AWS Load Balancer Controller via Helm, wired to IRSA so the
-     controller pod can call the AWS ELB API with least privilege.
-  3. Install Argo CD via its official Helm chart into the `argocd` namespace.
-  4. Register an Argo CD Application resource that watches k8s/overlays/dev in
-     this repo — from this point on, app deploys happen by committing to main.
+Here's what it does in order:
+  1. Creates the EKS cluster and Fargate profiles for the three namespaces
+     we care about: default (the Flask app), kube-system (the ALB controller
+     and CoreDNS), and argocd.
+  2. Installs the AWS Load Balancer Controller via Helm. It gets its own IAM
+     role via IRSA so it can talk to the ELB API without borrowing anyone
+     else's credentials.
+  3. Installs Argo CD from the community Helm chart into the argocd namespace.
+  4. Drops in an Argo CD Application manifest pointing at k8s/overlays/dev.
+     After this, deploying the app is just a git push — no kubectl from CI.
 
-The cluster SG created in NetworkStack is attached to the cluster so the
-firewall rules from the brief apply to Fargate pod ENIs.
+The cluster SG comes from NetworkStack, so all the firewall rules we set
+up there automatically apply to Fargate pod ENIs.
 """
 from aws_cdk import (
     Stack,
@@ -24,8 +27,8 @@ from aws_cdk import (
 from constructs import Construct
 
 
-# Repo URL that Argo CD will watch. Overridden via CDK context / env var in CI
-# so the same stack works for forks.
+# The repo Argo CD will watch. You can override this via CDK context
+# (--context repoUrl=...) so forks don't need to edit this file.
 DEFAULT_REPO_URL = "https://github.com/masterminders-maker/fincra-take-home.git"
 
 
@@ -43,9 +46,10 @@ class EksStack(Stack):
         repo_url = self.node.try_get_context("repoUrl") or DEFAULT_REPO_URL
 
         # --- Cluster admin role -------------------------------------------------
-        # A dedicated role that has kubectl access. In a real deployment this
-        # would be mapped to the GitHub Actions OIDC role (or to SSO groups)
-        # via aws-auth so humans never use long-lived keys.
+        # A dedicated IAM role that gets kubectl access via the masters group.
+        # In a real setup you'd map this to your GitHub Actions OIDC role or
+        # SSO groups through aws-auth — no one should be using long-lived keys
+        # to talk to the cluster.
         cluster_admin = iam.Role(
             self,
             "ClusterAdminRole",
@@ -54,6 +58,8 @@ class EksStack(Stack):
         )
 
         # --- The cluster --------------------------------------------------------
+        # Fargate-only — no EC2 managed node group. default_capacity=0 stops CDK
+        # from adding one automatically.
         cluster = eks.Cluster(
             self,
             "FincraCluster",
@@ -61,7 +67,7 @@ class EksStack(Stack):
             kubectl_layer=kubectl_v30.KubectlV30Layer(self, "KubectlLayer"),
             vpc=vpc,
             vpc_subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
-            default_capacity=0,              # no managed node group; Fargate only
+            default_capacity=0,
             masters_role=cluster_admin,
             security_group=cluster_security_group,
             cluster_name="fincra-cluster",
@@ -69,9 +75,8 @@ class EksStack(Stack):
         )
 
         # --- Fargate profiles ---------------------------------------------------
-        # One profile per namespace we intend to run pods in. `default` is for
-        # the Flask app, `kube-system` covers the ALB controller and CoreDNS,
-        # and `argocd` is Argo CD itself.
+        # Fargate won't run a pod unless its namespace matches a profile, so we
+        # need one for each namespace we actually use. Three namespaces, three profiles.
         cluster.add_fargate_profile(
             "DefaultFargateProfile",
             selectors=[eks.Selector(namespace="default")],
@@ -88,16 +93,16 @@ class EksStack(Stack):
         )
 
         # --- AWS Load Balancer Controller --------------------------------------
-        # IRSA (IAM Roles for Service Accounts): the controller SA in kube-system
-        # assumes this role via OIDC so we don't share node creds.
+        # The controller needs to call AWS APIs to create ALBs. We give it its
+        # own IAM role via IRSA (pod identity through OIDC) instead of sharing
+        # whatever the node would have — least privilege, no credential leakage.
         alb_sa = cluster.add_service_account(
             "AwsLoadBalancerControllerSA",
             name="aws-load-balancer-controller",
             namespace="kube-system",
         )
-        # ElasticLoadBalancingFullAccess is the managed policy for the controller.
-        # In production, pin to the official policy JSON from the
-        # aws-load-balancer-controller repo for least privilege.
+        # AWS's managed policy works fine here. If this were going to prod, you'd
+        # swap it for the scoped-down policy JSON from the controller's own repo.
         alb_sa.role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name("ElasticLoadBalancingFullAccess")
         )
@@ -120,9 +125,9 @@ class EksStack(Stack):
         )
 
         # --- Argo CD ------------------------------------------------------------
-        # Installed via the community Helm chart. On a fresh cluster this is the
-        # only thing CI pushes imperatively — everything after this point is
-        # pull-based GitOps.
+        # Argo CD itself is the one thing we push imperatively on a fresh cluster.
+        # Once it's up, it takes over — all subsequent deploys are pull-based.
+        # CI commits a git-sha tag bump and Argo CD reconciles the rest.
         argocd_chart = cluster.add_helm_chart(
             "ArgoCd",
             chart="argo-cd",
@@ -131,9 +136,9 @@ class EksStack(Stack):
             namespace="argocd",
             create_namespace=True,
             values={
-                # Server not exposed publicly; access via `kubectl port-forward`
-                # or add an Ingress in a follow-up. Keeping the attack surface
-                # minimal for a fintech-adjacent take-home.
+                # The Argo CD UI stays internal — reach it with kubectl port-forward.
+                # Not worth exposing it publicly for a take-home; the attack surface
+                # isn't worth it and port-forward is fine for local access.
                 "server": {
                     "service": {"type": "ClusterIP"},
                 },
@@ -141,8 +146,8 @@ class EksStack(Stack):
         )
 
         # --- Argo CD Application ------------------------------------------------
-        # A bootstrap Application that points Argo CD at k8s/overlays/dev in
-        # this repo. Once reconciled, Argo CD owns the Flask app's lifecycle.
+        # This is the bootstrap manifest that tells Argo CD where to look.
+        # Once it reconciles, Argo CD owns the app — we just commit and it deploys.
         argocd_app = cluster.add_manifest(
             "FincraAppArgoCdApplication",
             {
@@ -171,10 +176,12 @@ class EksStack(Stack):
                 },
             },
         )
-        # Argo CD CRDs must exist before the Application manifest is applied.
+        # The Application CRD only exists after Argo CD is installed, so we
+        # explicitly declare this dependency to make sure ordering is correct.
         argocd_app.node.add_dependency(argocd_chart)
 
         # --- Outputs ------------------------------------------------------------
+        # Handy stack outputs — the update-kubeconfig command is copy-pasteable.
         CfnOutput(self, "ClusterName", value=cluster.cluster_name)
         CfnOutput(
             self,

@@ -1,15 +1,20 @@
 name: config
 
-# Deploys the Fincra take-home stack on every push to main.
+# Runs on every push to main and kicks off the full deploy pipeline.
 #
-# Flow:
-#   1. lint-and-test    - sanity checks on CDK synth and manifests.
-#   2. build-and-push   - build Docker image, push to ECR with the git SHA as tag.
-#   3. deploy-infra     - CDK deploy of NetworkStack + EksStack (idempotent).
-#   4. bump-image       - commit a kustomize image tag bump so Argo CD rolls out.
+# The four jobs run in order:
+#   1. lint-and-test  — catches broken CDK code and bad manifests before
+#                       we spend any real time or money touching AWS.
+#   2. build-and-push — builds the Docker image and pushes it to ECR,
+#                       tagged with the first 7 chars of the git SHA.
+#   3. deploy-infra   — runs `cdk deploy` for both stacks. Safe to re-run;
+#                       CDK figures out what actually changed.
+#   4. bump-image     — updates the image tag in the dev kustomize overlay
+#                       and commits it back to main. Argo CD sees the commit
+#                       and rolls out the new image on its own — no kubectl.
 #
-# Everything after deploy-infra is pull-based: Argo CD watches the repo and
-# reconciles the cluster. We never `kubectl apply` from CI.
+# After step 3 everything is GitOps. CI only commits a file; the cluster
+# does the rest.
 
 on:
   push:
@@ -18,7 +23,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Required for GitHub OIDC → AWS IAM federation. No static AWS keys anywhere.
+# id-token:write is what lets GitHub mint the OIDC token that AWS trusts.
+# Without it, the aws-actions/configure-aws-credentials step just fails.
+# No static AWS keys stored anywhere — federation all the way.
 permissions:
   id-token: write
   contents: write        # bump-image job commits the tag bump back to main
@@ -26,14 +33,15 @@ permissions:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: fincra-app
-  # Set these in the repo's GitHub Actions secrets / variables before first run:
-  #   AWS_DEPLOY_ROLE_ARN  → IAM role trust-policy'd to this repo via OIDC
-  #   AWS_ACCOUNT_ID       → target account
-  # Kept as vars (not secrets) since ARNs and account IDs are not sensitive.
+  # Before you run this for the first time, set these two in the repo's
+  # GitHub Actions → Variables (not Secrets — they're not sensitive values):
+  #   AWS_DEPLOY_ROLE_ARN  — the IAM role this repo is allowed to assume via OIDC
+  #   AWS_ACCOUNT_ID       — the target AWS account number
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1. Lint + sanity tests. Fast fail before we touch AWS.
+  # 1. Lint + sanity checks — we want to catch silly mistakes here, not after
+  #    we've already started touching AWS resources.
   # ---------------------------------------------------------------------------
   lint-and-test:
     runs-on: ubuntu-latest
@@ -58,7 +66,7 @@ jobs:
           python -c "
           import sys
           sys.path.insert(0, '.')
-          # Validate Python syntax on all stack files
+          # Quick syntax check — doesn't run CDK, just makes sure the files parse
           import py_compile
           py_compile.compile('app.py', doraise=True)
           py_compile.compile('stacks/network_stack.py', doraise=True)
@@ -76,14 +84,15 @@ jobs:
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           sudo mv kustomize /usr/local/bin/
           kustomize build k8s/overlays/dev > /tmp/rendered.yaml
-          # Basic checks: must contain Deployment, Service, Ingress.
+          # Make sure the rendered output actually has what we expect
           grep -q "kind: Deployment" /tmp/rendered.yaml
           grep -q "kind: Service" /tmp/rendered.yaml
           grep -q "kind: Ingress" /tmp/rendered.yaml
           echo "kustomize build: OK"
 
   # ---------------------------------------------------------------------------
-  # 2. Build the container image and push to ECR, tagged with the git SHA.
+  # 2. Build and push — image gets tagged with the short git SHA so every
+  #    build is uniquely traceable back to the commit that produced it.
   # ---------------------------------------------------------------------------
   build-and-push:
     needs: lint-and-test
@@ -122,7 +131,9 @@ jobs:
           echo "Pushed: $IMAGE_URI"
 
   # ---------------------------------------------------------------------------
-  # 3. Deploy / update infrastructure. Idempotent — safe to run every push.
+  # 3. Deploy infrastructure — runs `cdk deploy` for both stacks. CDK diffs
+  #    against the current state, so re-running this on an unchanged stack
+  #    is a no-op. Safe to run on every push.
   # ---------------------------------------------------------------------------
   deploy-infra:
     needs: build-and-push
@@ -152,7 +163,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: CDK bootstrap (no-op if already done)
+      - name: CDK bootstrap (safe to re-run — skips if the bootstrap stack already exists)
         working-directory: infra
         env:
           CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
@@ -167,8 +178,9 @@ jobs:
         run: cdk deploy --all --require-approval never
 
   # ---------------------------------------------------------------------------
-  # 4. Bump the image tag in the dev overlay and commit.
-  #    Argo CD sees the commit and rolls out the new image. No kubectl here.
+  # 4. Bump the image tag — writes the new SHA tag into the dev kustomize
+  #    overlay and commits it back to main. Argo CD picks up the commit
+  #    and rolls out the new image. No kubectl, no imperative applies.
   # ---------------------------------------------------------------------------
   bump-image:
     needs: [build-and-push, deploy-infra]

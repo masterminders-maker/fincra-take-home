@@ -20,3 +20,6 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+
+
+SELECT role, COUNT(*) AS count FROM users GROUP BY role ORDER BY role; SELECT COUNT(*) AS stores FROM stores; SELECT COUNT(*) AS riders FROM riders; SELECT COUNT(*) AS orders FROM orders; SELECT COUNT(*) AS products FROM products;

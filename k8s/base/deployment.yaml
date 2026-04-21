@@ -16,9 +16,9 @@ spec:
     spec:
       containers:
         - name: web
-          # Image tag is patched per-overlay. The CI workflow pushes a
-          # :<git-sha> tag to ECR on every commit; the overlay references
-          # that tag so Argo CD rolls out automatically.
+          # Don't edit the tag here — the dev overlay overrides it.
+          # CI writes the real git-SHA tag there on every push, and Argo CD
+          # picks it up and rolls out automatically.
           image: ghcr.io/YOUR_GITHUB_USER/fincra-app:latest
           imagePullPolicy: IfNotPresent
           ports:

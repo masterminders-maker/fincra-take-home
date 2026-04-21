@@ -6,11 +6,13 @@ namespace: default
 resources:
   - ../../base
 
-# Pins the image and tag the CI job pushes. Override this placeholder with
-# your real ECR URI once you deploy: e.g.,
+# This is the image override for the dev environment. The tag starts as
+# `latest` but CI rewrites it to the actual git SHA on every push using
+# `kustomize edit set image` — so what you see committed here is always
+# the last successfully built image.
+#
+# Once you've deployed, swap the placeholder name for your real ECR URI, e.g.:
 #   675344693525.dkr.ecr.us-east-1.amazonaws.com/fincra-app
-# The tag is swapped by the GitHub Actions workflow using `kustomize edit set image`
-# so deploys are git-sha traceable.
 images:
   - name: ghcr.io/masterminders-maker/fincra-app
     newName: ghcr.io/masterminders-maker/fincra-app

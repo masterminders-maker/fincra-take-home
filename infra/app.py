@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-CDK entrypoint for the Fincra DevOps take-home.
+This is where everything boots up.
 
-Two stacks:
-  - NetworkStack: VPC + security groups (the firewall rules from the brief).
-  - EksStack:     EKS Fargate cluster, AWS Load Balancer Controller, and Argo CD.
+We spin up two stacks in order:
+  - NetworkStack first — it owns the VPC and security groups, so EksStack
+    needs it to exist before it can do anything useful.
+  - EksStack second — gets the VPC and cluster SG handed to it from above.
 
-Region/account come from the CDK environment (CDK_DEFAULT_ACCOUNT /
-CDK_DEFAULT_REGION), which GitHub Actions populates via OIDC credentials.
+We don't hardcode the AWS account or region here. CDK picks those up from
+CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION, which GitHub Actions sets
+automatically when it federates into AWS via OIDC.
 """
 import os
 

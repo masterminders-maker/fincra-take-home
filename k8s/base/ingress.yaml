@@ -3,9 +3,10 @@ kind: Ingress
 metadata:
   name: fincra-app
   annotations:
-    # These annotations tell the AWS Load Balancer Controller to provision
-    # an internet-facing ALB and point it at pod IPs directly. `ip` target
-    # type is mandatory on Fargate — `instance` only works for EC2 nodes.
+    # These three annotations are what actually make the ALB Controller do
+    # something useful. `internet-facing` puts the ALB in the public subnets,
+    # and `ip` target type routes traffic straight to pod IPs — you have to use
+    # `ip` on Fargate because there are no EC2 nodes to target by instance.
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip

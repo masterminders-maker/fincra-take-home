@@ -3,5 +3,6 @@ kind: Deployment
 metadata:
   name: fincra-app
 spec:
-  # 2 replicas so the ALB has >1 healthy target and we exercise rolling updates.
+  # Two replicas means the ALB always has a second healthy pod to fall back to
+  # during a rolling update — one goes down, one keeps serving traffic.
   replicas: 2
